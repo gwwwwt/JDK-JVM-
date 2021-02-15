@@ -16,8 +16,6 @@
 > >
 > > Clion 2020.1
 
-
-
 #### 1. 源码下载
 
 > 在《深入理解Java虚拟机》以及其它网络Blog上一般都说要采用 "Mercurial" 或直接到 "http://hg.openjdk.java.net/jdk/jdk12" 上下载源码;
@@ -27,8 +25,6 @@
 > 直接下载并解压到事先创建的 "~/jvm/" 目录中, 并且将源码解压后的目录重命名为'jdk12';
 >
 > 所以在本机上, 执行编译命令的目录为***"~/jvm/jdk12"***
-
-
 
 #### 2. 编译
 
@@ -129,7 +125,7 @@ make CONF=macosx-x86_64-server-fastdebug
 
 在`CLion`中，首先确保配置好了 `Toolchains`，可通过如下界面进行配置：
 
-<img src="./toolchain.png" alt="配置toolchain" />
+<img src="../assets/toolchain.png" alt="配置toolchain" style="zoom:80%;" />![add build target](../assets/buildtarget.png)
 
 配置好`Toolchains`后，通过`File -> Open...`功能，选中`${source_root}/build/macosx-x86_64-server-fastdebug/compile_commands.json`，`As a project`打开，这样就导入了`Compilation Database`文件，接下来`CLion`开始进行索引。
 
@@ -147,9 +143,9 @@ make CONF=macosx-x86_64-server-fastdebug
 >
 > > ***需要注意的是，下面的截图是直接使用参考Blog的截图，所以它使用的是slowdebug***
 
-![add build target](./buildtarget.png)
+![add build target](../assets/buildtarget.png)
 
-<img src="./make.png" alt="make build" style="zoom:150%;" />
+<img src="../assets/make.png" alt="make build" style="zoom:80%;" />![run/Debug](../assets/rundebug.png)
 
 
 
@@ -157,7 +153,7 @@ make CONF=macosx-x86_64-server-fastdebug
 
 > ***新建 "Custom Build Application" 配置***
 
-![run/Debug](./rundebug.png)
+![run/Debug](../assets/rundebug.png)
 
 - `Target`：选择上一步配置的`Build Target`；
 - `Executable`：选择`${source_root}/build/macosx-x86_64-server-slowdebug/jdk/bin/java`，或者其它你想调试的文件，比如`javac`；
@@ -169,7 +165,7 @@ make CONF=macosx-x86_64-server-fastdebug
 
 在`${source_root}/src/java.base/share/native/libjli/java.c`的`401`行打断点，点击`Debug`，效果如下：
 
-![打断点](./breakpoint.png)
+<img src="../assets/breakpoint.png" alt="打断点" style="zoom:80%;" />
 
 
 
@@ -177,7 +173,7 @@ make CONF=macosx-x86_64-server-fastdebug
 
 > 在通常情况下，按上面的方式进行Debug时， 总会有一步出下如下问题:
 >
-> <img src="./debugerror.png" alt="Debug问题" style="zoom:80%;" />
+> <img src="../assets/debugerror.png" alt="Debug问题" style="zoom:80%;" />
 >
 > 
 >
@@ -192,7 +188,7 @@ make CONF=macosx-x86_64-server-fastdebug
 > >
 > > 之后：
 > >
-> > <img src="./debugsolution.png" alt="Debug问题解决" style="zoom:80%;" />
+> > <img src="../assets/debugsolution.png" alt="Debug问题解决" style="zoom:80%;" />
 
 
 
@@ -217,7 +213,7 @@ make CONF=macosx-x86_64-server-fastdebug
 
 首先java代码如下：
 
-<img src="./writecode.png" alt="Java代码Demo" style="zoom:80%;" />
+<img src="../assets/writecode.png" alt="Java代码Demo" style="zoom:80%;" />![Debug前编译代码](../assets/compilejava.png)
 
 
 
@@ -225,7 +221,7 @@ CLion中配置如下：
 
 > **注: 在本机上设置了Before launc时执行compile任务，但在执行java时却只完成了compile任务， 而没有继续执行java任务，所以本问题暂留；**
 
-![Debug前编译代码](./compilejava.png)
+![Debug前编译代码](../assets/compilejava.png)
 
 
 
@@ -245,7 +241,7 @@ CLion中配置如下：
 >
 > > 1. **修改源码**
 > >
-> >    <img src="./change_cpp.png" alt="修改源码" style="zoom:67%;" />
+> >    <img src="../assets/change_cpp.png" alt="修改源码" style="zoom:67%;" />
 > >
 > > 2. **执行make**
 > >
@@ -259,7 +255,7 @@ CLion中配置如下：
 > >
 > >    > **之后再次执行 "java -version"**
 > >    >
-> >    > <img src="./result.png" alt="执行结果" style="zoom:80%;" />
+> >    > <img src="../assets/result.png" alt="执行结果" style="zoom:80%;" />
 
 
 
