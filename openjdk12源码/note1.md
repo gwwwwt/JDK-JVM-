@@ -122,5 +122,5 @@ return JLI_Launch(margc, margv,
 
 > 上面的函数经过一番分析调用后，最终找到的入口函数如下：
 
-![入口函数](./入口函数.png)
+<img src="../assets/入口函数.png" alt="入口函数" style="zoom:80%;" />
 

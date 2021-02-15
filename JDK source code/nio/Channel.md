@@ -2,7 +2,7 @@
 
 
 
-<img src="./AbstractInterruptibleChannel.png" style="zoom:50%;" />
+<img src="../../assets/AbstractInterruptibleChannel.png" style="zoom:50%;" />
 
 
 
