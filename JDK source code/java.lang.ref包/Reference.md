@@ -40,7 +40,7 @@
   而当Reference位于各个状态时, 它的queue和next成员变量的引用如下: 
   1. Active; queue = 实例注册的ReferenceQueue实例或RefereneceQueue.NULL; next = null; 
   2. Pending; queue = 实例注册的ReferenceQueue实例; next = this; 
-  3. Enqueued: queue = 实例注册的ReferenceQueue实例; next = queue中的下一个Reference实例(或this, 如果
+  3. Enqueued: queue = ReferenceQueue.ENQUEUED; next = queue中的下一个Reference实例(或this, 如果
   		当前Reference实例已是queue中最后一个元素);
   4. Inactive; queue = ReferenceQueue.NULL; next = this;
   
