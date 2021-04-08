@@ -366,7 +366,8 @@ acquire 定义在AQS类中，描述了获取锁的流程
         // 如果没有人在排队, 则通过CAS方式获取锁, 就可以直接退出了
         if (c == 0) {
             if (!hasQueuedPredecessors() 
-            /* 为了阅读方便, hasQueuedPredecessors源码就直接贴在这里了, 这个方法的本质实际上是检测自己是不是head节点的后继节点，即处在阻塞队列第一位的节点
+            /* 为了阅读方便, hasQueuedPredecessors源码就直接贴在这里了, 
+            这个方法的本质实际上是检测自己是不是head节点的后继节点，即处在阻塞队列第一位的节点
                 public final boolean hasQueuedPredecessors() {
                     Node t = tail; 
                     Node h = head;
@@ -726,7 +727,7 @@ addWaiter(Node.EXCLUSIVE)方法最终返回了代表了当前线程的Node节点
     }
 ```
 
-可以看出，当shouldParkAfterFailedAcquire返回false后，会继续回到循环中再次尝试获取锁——这是因为此时我们的前驱节点可能已经变了（搞不好前驱节点就变成head节点了呢）。
+可以看出，当shouldParkAfterFailedAcquire返回false后，会继续回到循环中再次尝试获取锁——这是因为此时我们的前驱节点可能已经变了***<u>（搞不好前驱节点就变成head节点了呢）</u>***。
 
 当shouldParkAfterFailedAcquire返回true，即当前节点的前驱节点的waitStatus状态已经设为SIGNAL后，我们就可以安心的将当前线程挂起了，此时我们将调用parkAndCheckInterrupt：
 

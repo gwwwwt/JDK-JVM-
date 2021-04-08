@@ -116,11 +116,11 @@
 
 ### sync queue 和 conditon queue的联系
 
-一般情况下，等待锁的`sync queue`和条件队列`condition queue`是相互独立的，彼此之间并没有任何关系。但是，当我们调用某个条件队列的signal方法时，会将某个或所有等待在这个条件队列中的线程唤醒，被唤醒的线程和普通线程一样需要去争锁，如果没有抢到，则同样要被加到等待锁的`sync queue`中去，此时节点就从`condition queue`中被转移到`sync queue`中：![condtion queue to sync queue](./16082733137853.png)
+一般情况下，等待锁的`sync queue`和条件队列`condition queue`是相互独立的，彼此之间并没有任何关系。但是，当我们调用某个条件队列的signal方法时，会将某个或所有等待在这个条件队列中的线程唤醒，被唤醒的线程和普通线程一样需要去争锁，如果没有抢到，则同样要被加到等待锁的`sync queue`中去，此时节点就从`condition queue`中被转移到`sync queue`中：![condtion queue to sync queue](../../assets/16082733137853.png)
 
-但是，这里尤其要注意的是，node是被**一个一个**转移过去的，哪怕我们调用的是`signalAll()`方法也是**一个一个**转移过去的，而不是将整个条件队列接在`sync queue`的末尾。
+但是，**这里尤其要注意的是，node是被一个一个转移过去的，哪怕我们调用的是`signalAll()`方法也是一个一个转移过去的，而不是将整个条件队列接在`sync queue`的末尾**。
 
-同时要注意的是，我们在`sync queue`中只使用`prev`、`next`来串联链表，而不使用`nextWaiter`;我们在`condition queue`中只使用`nextWaiter`来串联链表，而不使用`prev`、`next`.事实上，它们就是两个使用了同样的Node数据结构的完全独立的两种链表。因此，将节点从`condition queue`中转移到`sync queue`中时，我们需要断开原来的链接（`nextWaiter`）,建立新的链接（`prev`, `next`），这某种程度上也是需要将节点**一个一个**地转移过去的原因之一。
+同时要注意的是，我们在`sync queue`中只使用`prev`、`next`来串联链表，而不使用`nextWaiter`；我们在`condition queue`中只使用`nextWaiter`来串联链表，而不使用`prev`、`next`.事实上，它们就是两个使用了同样的Node数据结构的完全独立的两种链表。因此，将节点从`condition queue`中转移到`sync queue`中时，我们需要断开原来的链接（`nextWaiter`）,建立新的链接（`prev`, `next`），这某种程度上也是需要将节点**一个一个**地转移过去的原因之一。
 
 ### 入队时和出队时的锁状态
 
@@ -776,7 +776,7 @@ interruptMode现在为`THROW_IE`，则我们将执行break，跳出while循环�
             } else {
                 node.prev = t;
                 if (compareAndSetTail(t, node)) { //即使这一步失败了next.prev一定是有值的
-                    t.next = node; // 如果t.next有值，说明上面的compareAndSetTail方法一定成功了，则当前节点成为了新的尾节点
+                    t.next = node; //如果t.next有值，说明上面的compareAndSetTail方法一定成功了，则当前节点成为了新的尾节点
                     return t; // 返回了当前节点的前驱节点
                 }
             }
@@ -1125,6 +1125,4 @@ interruptMode现在为`THROW_IE`，则我们将执行break，跳出while循环�
 
 可见，这里大段的代码都是重复的，区别就是在超时时间的判断上使用了绝对时间，其实这里的deadline就和`awaitNanos(long nanosTimeout)`以及`await(long time, TimeUnit unit)`内部的`deadline`变量是等价的，另外就是在这个方法中，没有使用`spinForTimeoutThreshold`进行自旋优化，因为一般调用这个方法，目的就是设定一个较长的等待时间，否则使用上面的相对时间会更方便一点。
 
-至此，AQS对于Condition接口的实现我们就全部分析完了。
-
-（完）
+至此，AQS对于Condition接口的实现我们就全部分析完了。s

@@ -15,7 +15,7 @@
     ...
     lock.lock();
     try {
-        // 更新对象
+        //更新对象
         //捕获异常
     } finally {
         lock.unlock();
@@ -129,7 +129,7 @@ release方法定义在AQS类中，描述了释放锁的流程
             s = null;
             for (Node t = tail; t != null && t != node; t = t.prev)
                 if (t.waitStatus <= 0)
-                    s = t; // 注意! 这里找到了之后并没有return, 而是继续向前找
+                    s = t; // 注意! 这里找到了之后并退出循环, 而是继续向前找
         }
         // 如果找到了还在等待锁的节点,则唤醒它
         if (s != null)

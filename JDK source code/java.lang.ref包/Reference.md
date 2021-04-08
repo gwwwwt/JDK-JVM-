@@ -236,27 +236,19 @@ public abstract class Reference<T> {
 >    >
 >    > ***具体Reference被加入ReferenceQueue的时机, 是在Reference static静态代码块中启动的ReferenceHandler线程中, 通过遍历获取到pending list中的元素后, 调用ReferenceQueue#enqueue方法完成的;***
 >    >
->    > > **需要注意的是, 在ReferenceQueue#enqueue方法中, Reference被加入到Queue中时, 是添加到ReferenceQueue#head指定的链表中的, Reference#next指向原head节点; 而Reference#queue则会变为 ReferenceQueue.ENQUEUED引用, 用于表示当前Reference状态; **
-
-
+>    > > **需要注意的是, 在ReferenceQueue#enqueue方法中, Reference被加入到Queue中时, 是添加到ReferenceQueue#head指定的链表中的, Reference#next指向原head节点; 而Reference#queue则会变为 ReferenceQueue.ENQUEUED引用, 用于表示当前Reference状态; `即：Reference被加入到ReferenceQueue中之后，Reference中不再持有Queue的引用，因为在enqueue方法中会将Reference#queue成员变量设置为ENQUEUED引用。` **
 
 ##### 1.3 ReferenceHandler线程
 
 > 根据1.2节, Reference实例从pending list 转加入到 ReferenceQueue的操作是在ReferenceHandler线程中完成的;
 
-
-
 ##### 1.4 Reference状态转换的完整流程
 
 <img src="../../assets/reference-process.png" alt="Reference process" style="zoom:80%;" />
 
-
-
 #### 2. 子类实现
 
 <img src="../../assets/reference-subclass.png" alt="Reference子类" style="zoom:80%;" />
-
-
 
 ##### 2.1 SoftReference
 
@@ -296,8 +288,6 @@ public class SoftReference<T> extends Reference<T> {
 }
 ```
 
-
-
 ##### 2.2 WeakReference
 
 > **基本只是继承了Reference基类, 并未有特别的处理; 所以可以认为WeakReference只起到了一个标记作用, JVM可以在检测到某实例是WeakReference的话, 会在垃圾回收时将之回收; **
@@ -329,8 +319,6 @@ public class WeakReference<T> extends Reference<T> {
 
 }
 ```
-
-
 
 ##### 2.3 PhantomReference
 
@@ -370,8 +358,6 @@ public class PhantomReference<T> extends Reference<T> {
 
 }
 ```
-
-
 
 ###### 2.3.1 虚引用子类 Cleaner
 
@@ -492,8 +478,6 @@ public class Cleaner extends PhantomReference<Object>
   }
 }
 ```
-
-
 
 ##### 2.4 FinalReference & Finalizer
 
@@ -779,6 +763,3 @@ final class Finalizer extends FinalReference<Object> {
 >   > ```
 >   >
 >   > > 简单来看就是把创建对象过程中，如果有必要注册`Finalizer`(一般是覆盖了`finalize()`方法)，则基于当前线程通过`Finalizer#register(Object finalizee)`把当前新建的实例注册到`Finalizer`自身维护的链表中(如果没理解错，所谓的`F-Queue`就是这个链表了)，等待后台`Finalizer`线程轮询并且执行链表中对象的`finalize()`方法。
-
-
-
