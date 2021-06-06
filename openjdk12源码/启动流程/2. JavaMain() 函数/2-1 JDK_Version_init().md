@@ -1,4 +1,4 @@
-# jdk version初始化
+# JDK_Version_init()
 
 > **在《7. INitializeJVM 初始化JavaMV.md》第3节，调用了`JDK_Version_init()`函数。**
 
@@ -33,8 +33,6 @@ void JDK_Version::initialize() {
   jdk_version_info_fn_t func = CAST_TO_FN_PTR(jdk_version_info_fn_t,
      os::dll_lookup(lib_handle, "JDK_GetVersionInfo0"));
 
-  assert(func != NULL, "Support for JDK 1.5 or older has been removed after JEP-223");
-
   //调用 "JDK_GetVersionInfo0()" 初始化info中的字段值
   (*func)(&info, sizeof(info));
 
@@ -45,8 +43,7 @@ void JDK_Version::initialize() {
 
   // 本字段在JDK_GetVersionInfo0中设置为1
   if (info.pending_list_uses_discovered_field == 0) {
-    vm_exit_during_initialization(
-      "Incompatible JDK is not using Reference.discovered field for pending list");
+    vm_exit_during_initialization("Incompatible JDK is not using Reference.discovered field for pending list");
   }
   _current = JDK_Version(major, minor, security, info.patch_version, build,
                          info.thread_park_blocker == 1, //true

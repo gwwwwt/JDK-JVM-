@@ -4,27 +4,29 @@
 
 > ***`Arguments::parse()方法核心逻辑在于，将从环境变量以及命令行参数中获取到的不同来源的Options统一的进行遍历，将每个Option配置项转换成Arguments中的不同字段保存的信息。这样经过Arguments::parse()方法后，所有的配置信息均可以通过Arguments中的不同字段得到，即Arguments成为一个统一的配置注册中心`***
 
-> **ScopedVMInitArgs可以理解为JavaVMInitArgs的包装类，不同的对象包装不同的JavaVMInitArgs对象**
+> **ScopedVMInitArgs可以理解为`按作用域获取到的JavaVMInitArgs的包装类`，`不同作用域对应的不同的JavaVMInitArgs对象`。`前面已经通过解析命令行参数的方式获取到了很多options，可以理解成命令行这个scope对应的JavaVMInitArgs对象。通过下面的分析说明，可以看到，还有另外2个scope对应的JavaVMInitArgs对象，分别是环境变量'JAVA_TOOL_OPTIONS' 和 环境变量'_JAVA_OPTIONS'，它们分别对应的JavaVMInitArgs对象。`**
+>
+> ***`而 Arguments::parse() 方法的最终目标就是，将上面3个scope所分别对应的JavaVMInitArgs统一到一个大的结果集中`***
 >
 > ```c++
 > class ScopedVMInitArgs : public StackObj { //arguments.cpp
->  private:
->   JavaVMInitArgs _args;
->   char*          _container_name; //区分不同的包装类作用
->   bool           _is_set;
->   char*          _vm_options_file_arg;
+> private:
+> JavaVMInitArgs _args;
+> char*          _container_name; //区分不同的包装类作用
+> bool           _is_set;
+> char*          _vm_options_file_arg;
 > 
->  public:
->   ScopedVMInitArgs(const char *container_name) {
->     _args.version = JNI_VERSION_1_2;
->     _args.nOptions = 0;
->     _args.options = NULL;
->     _args.ignoreUnrecognized = false;
->     _container_name = (char *)container_name;
->     _is_set = false;
->     _vm_options_file_arg = NULL;
->   }
->   //...
+> public:
+> ScopedVMInitArgs(const char *container_name) {
+>  _args.version = JNI_VERSION_1_2;
+>  _args.nOptions = 0;
+>  _args.options = NULL;
+>  _args.ignoreUnrecognized = false;
+>  _container_name = (char *)container_name;
+>  _is_set = false;
+>  _vm_options_file_arg = NULL;
+> }
+> //...
 > }
 > ```
 
@@ -592,7 +594,7 @@ jint Arguments::parse_vm_init_args(const JavaVMInitArgs *java_tool_options_args,
 >        agent_invalid = 0,
 >        agent_valid   = 1
 >      };
->    
+>             
 >     private:
 >      char*           _name;
 >      char*           _options;
@@ -604,7 +606,7 @@ jint Arguments::parse_vm_init_args(const JavaVMInitArgs *java_tool_options_args,
 >      AgentLibrary*   _next;  //可形成单向链表, 用AgentLibraryList对象表示
 >      //...
 >    }
->    
+>             
 >    class AgentLibraryList { //表示AgentLibrary单向链表
 >     private:
 >      AgentLibrary*   _first;
@@ -1205,8 +1207,8 @@ jint Arguments::finalize_vm_init_args(bool patch_mod_javabase) {
 
   char path[JVM_MAXPATHLEN];
   const char* fileSep = os::file_separator();
-  //Arguments::get_java_home()返回 "_java_home->value()"; 
-  //而关于"_java_home"字段的初始化参考《7. InitializeJVM 初始化JavaVM结构体信息.md》
+  //Arguments::get_java_home()返回 "java_home->value()"; 
+  //而关于"_java_home"字段的初始化参考《2-0 Threads::create_vm() -- 核心创建VM逻辑.md》
   jio_snprintf(path, JVM_MAXPATHLEN, "%s%slib%sendorsed", Arguments::get_java_home(), fileSep, fileSep);
 
   // 检查是否存在 {_java_home}/lib/endorsed 目录; 

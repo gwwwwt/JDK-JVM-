@@ -1,290 +1,58 @@
-# InitializeJVM 函数
-
-> **源码: java.c**
-
-```c
-/*
-作用: 
-1. 初始化 Java Virtual Machine(用JavaVM结构体表示)
-2. 初始化完成后释放options数组
-*/
-static jboolean InitializeJVM(JavaVM **pvm, JNIEnv **penv, InvocationFunctions *ifn)
-{
-    JavaVMInitArgs args;
-    jint r;
-
-    //用从命令行解析的JVM参数信息填充args结构体
-    memset(&args, 0, sizeof(args));
-    args.version  = JNI_VERSION_1_2;
-    args.nOptions = numOptions;
-    args.options  = options;
-    args.ignoreUnrecognized = JNI_FALSE;
-
-    if (JLI_IsTraceLauncher()) { //log
-        int i = 0;
-        printf("JavaVM args:\n    ");
-        printf("version 0x%08lx, ", (long)args.version);
-        printf("ignoreUnrecognized is %s, ",
-               args.ignoreUnrecognized ? "JNI_TRUE" : "JNI_FALSE");
-        printf("nOptions is %ld\n", (long)args.nOptions);
-        for (i = 0; i < numOptions; i++)
-            printf("    option[%2d] = '%s'\n",
-                   i, args.options[i].optionString);
-    }
-
-    //主要调用了ifn->CreateJavaVM函数指针来完成创建JVM的工作
-    r = ifn->CreateJavaVM(pvm, (void **)penv, &args);
-    JLI_MemFree(options);
-    return r == JNI_OK;
-}
-```
-
-
-
-## 1. JNI_CreateJavaVM函数
-
-> **"ifn->CreateJavaVM"指向的就是`JNI_CreateJavaVM`函数**
->
-> **源码: jni.cpp**
-
-```c++
-_JNI_IMPORT_OR_EXPORT_ jint JNICALL JNI_CreateJavaVM(JavaVM **vm, void **penv, void *args) {
-  jint result = JNI_ERR;
-  result = JNI_CreateJavaVM_inner(vm, penv, args); //主要调用函数
-  return result;
-}
-```
-
-
-
-## 2. JNI_CreateJavaVM_inner函数
-
-> **重要的函数调用: Threads::create_vm**
-
-```c++
-static jint JNI_CreateJavaVM_inner(JavaVM **vm, void **penv, void *args) {
-  
-  HOTSPOT_JNI_CREATEJAVAVM_ENTRY((void **) vm, penv, args); //略
-
-  jint result = JNI_ERR;
-  DT_RETURN_MARK(CreateJavaVM, jint, (const jint&)result); //略
-
-  // 原英文注释: 下面的逻辑会用Atomic::xchg实现同步. 有些 Zero platforms使用
-  // GCC内嵌的 __sync_lock_test_and_test来实现Atomic::xchg. 但是不同的平台
-  // 对该指令的支持不同, 所以下面的 #if 主要是测试Atomic::xchg能否实现期望的功能
-  /*
-  Atomic::xchg(v1, p)方法大概逻辑是原子的实现如下序列:
-  	{
-  		v2 = *p; //取指针目标的原值
-  		*p = v1; //将指针目标的值更新为参数
-  		return v2; //返回原指针目标值
-  	}
-  */
-#if defined(ZERO) && defined(ASSERT)
-  {
-    jint a = 0xcafebabe;
-    //结果: b: 0xcafebabe; a: 0xdeadbeef 
-    jint b = Atomic::xchg((jint) 0xdeadbeef, &a);
-    void *c = &a;
-    //结果: c: &b; d: &a
-    void *d = Atomic::xchg(&b, &c);
-    assert(a == (jint) 0xdeadbeef && b == (jint) 0xcafebabe, "Atomic::xchg() works");
-    assert(c == &b && d == &a, "Atomic::xchg() works");
-  }
-#endif // ZERO && ASSERT
-
-  //将vm_created设置为1, 如果 vm_created 之前已经是1, 直接退出
-  if (Atomic::xchg(1, &vm_created) == 1) {
-    return JNI_EEXIST;   
-  }
-  //将safe_to_recreate_vm更新为0, 如果它的值之前已经是0, 直接退出
-  if (Atomic::xchg(0, &safe_to_recreate_vm) == 0) {
-    return JNI_ERR; 
-  }
-  assert(vm_created == 1, "vm_created is true during the creation");
-
-  /*
-  成员变量作用, 原项注释: 如果在初始化过程中发生了一些特定错误的话, 并不会报错, 而是
-  隔一段时间之后再尝试执行; 但是如果发生了重要错误的话, 可以将can_try_again设置为false,
-  从而阻止再次执行初始化工作
-  */
-  bool can_try_again = true;
-
-  // --- ***核心调用***, 参考第3节
-  result = Threads::create_vm((JavaVMInitArgs*) args, &can_try_again);
-  
-  if (result == JNI_OK) {
-    JavaThread *thread = JavaThread::current();
-    assert(!thread->has_pending_exception(), "should have returned not OK");
-    /* thread is thread_in_vm here */
-    *vm = (JavaVM *)(&main_vm);
-    *(JNIEnv**)penv = thread->jni_environment();
-
-#if INCLUDE_JVMCI
-    if (EnableJVMCI) {
-      if (UseJVMCICompiler) {
-        // JVMCI is initialized on a CompilerThread
-        if (BootstrapJVMCI) {
-          JavaThread* THREAD = thread;
-          JVMCICompiler* compiler = JVMCICompiler::instance(true, CATCH);
-          compiler->bootstrap(THREAD);
-          if (HAS_PENDING_EXCEPTION) {
-            HandleMark hm;
-            vm_exit_during_initialization(Handle(THREAD, PENDING_EXCEPTION));
-          }
-        }
-      }
-    }
-#endif
-
-    // Tracks the time application was running before GC
-    RuntimeService::record_application_start();
-
-    // Notify JVMTI
-    if (JvmtiExport::should_post_thread_life()) {
-       JvmtiExport::post_thread_start(thread);
-    }
-
-    post_thread_start_event(thread);
-
-#ifndef PRODUCT
-    if (ReplayCompiles) ciReplay::replay(thread);
-
-    // Some platforms (like Win*) need a wrapper around these test
-    // functions in order to properly handle error conditions.
-    VMError::test_error_handler();
-#endif
-
-    // Since this is not a JVM_ENTRY we have to set the thread state manually before leaving.
-    ThreadStateTransition::transition_and_fence(thread, _thread_in_vm, _thread_in_native);
-  } else {
-    // If create_vm exits because of a pending exception, exit with that
-    // exception.  In the future when we figure out how to reclaim memory,
-    // we may be able to exit with JNI_ERR and allow the calling application
-    // to continue.
-    if (Universe::is_fully_initialized()) {
-      // otherwise no pending exception possible - VM will already have aborted
-      JavaThread* THREAD = JavaThread::current();
-      if (HAS_PENDING_EXCEPTION) {
-        HandleMark hm;
-        vm_exit_during_initialization(Handle(THREAD, PENDING_EXCEPTION));
-      }
-    }
-
-    if (can_try_again) {
-      // reset safe_to_recreate_vm to 1 so that retrial would be possible
-      safe_to_recreate_vm = 1;
-    }
-
-    // Creation failed. We must reset vm_created
-    *vm = 0;
-    *(JNIEnv**)penv = 0;
-    // reset vm_created last to avoid race condition. Use OrderAccess to
-    // control both compiler and architectural-based reordering.
-    OrderAccess::release_store(&vm_created, 0);
-  }
-
-  // Flush stdout and stderr before exit.
-  fflush(stdout);
-  fflush(stderr);
-
-  return result;
-
-}
-```
-
-
-
-## 3. Threads::create_vm
+# Threads::create_vm() -- 核心创建VM逻辑
 
 > **源码: thread.cpp**
 
 ```c++
 jint Threads::create_vm(JavaVMInitArgs* args, bool* canTryAgain) {
   
-  extern void JDK_Version_init(); //--- 参考3.1节
-
-  // VM初始化前的准备工作, 默认空实现
-  VM_Version::early_initialize();
+  // ------------------- 第1大步骤: 各种类的初始化; Arguments根据命令行参数设置对应字段值; 检查各项参数
+  extern void JDK_Version_init(); //--- 参考 《2. JavaMain() 函数/2-1 JDK_Version_init()》
+  
 
   //版本检查, 在InitializeJVM方法中构造args参数时, version传入的JNI_VERSION_1.2
   if (!is_supported_jni_version(args->version)) return JNI_EVERSION;
 
-  // Initialize library-based TLS, --- 参考3.2节
-  ThreadLocalStorage::init(); //用于存储线程本地Thread
+  // Initialize library-based TLS, --- 参考 《2. JavaMain() 函数/2-2 线程本地存储.md》
+  ThreadLocalStorage::init(); 
 
-  ostream_init(); // Initialize the output stream module
-
-  // Process java launcher properties. --- 参考3.3节
+  ostream_init();
+  
+  // Process java launcher properties. --- 参考第1节
   Arguments::process_sun_java_launcher_properties(args);
 
-  // Initialize the os module. --- 参考3.4节
+  // Initialize the os module. --- 参考《2. JavaMain() 函数/2-3 os::init().md》
   // 本方法主要初始化一些硬件、线程、条件/互斥对象的初始化
-  // 下面还会调用另一个os初始化方法, os::init_2()
+  // 后面还会调用另一个os初始化方法, os::init_2()
   os::init();
 
-  // Record VM creation timing statistics
-  TraceVmCreationTime create_vm_timer;
-  create_vm_timer.start();
+  Arguments::init_system_properties(); // 初始化 system properties --- 参考第2节
 
-  // Initialize system properties. --- 参考3.5节
-  Arguments::init_system_properties();
-
-  JDK_Version_init(); //调用3.1节extern导入的函数声明
+  JDK_Version_init(); // 上面是导入JDK_Version_init()函数, 这里是实际调用
   
-  // --- 上面初始化jdk version后, 将jvm version信息加入Arguments#_system_properties中
-  // 参考3.6节
+  // --- 上面初始化jdk version后, 将jvm version信息加入Arguments#_system_properties中, 参考第3节
   Arguments::init_version_specific_system_properties();
 
-  // 初始化Log相关配置
-  LogConfiguration::initialize(create_vm_timer.begin_time());
-
-  // --- 参考3.7节; 将多种来源的参数选项解析到Arguments的对应字段中
+  // --- 参考《2. JavaMain()函数/2-4 解析Options参数 Arguments::parse》 
+  // --- 作用: 将多种来源的参数选项解析到Arguments的对应字段中
   // --- ***重要: 解析所有配置options***; 方法内部调用了os::init_container_support()
   jint parse_result = Arguments::parse(args);
   if (parse_result != JNI_OK) return parse_result;
 
-  os::init_before_ergo(); //3.8节
+  os::init_before_ergo(); //第4节
 
-  jint ergo_result = Arguments::apply_ergo();//3.9节
-  if (ergo_result != JNI_OK) return ergo_result;
+  jint ergo_result = Arguments::apply_ergo();//第5节
 
-  // Final check of all ranges after ergonomics which may change values.
-  if (!JVMFlagRangeList::check_ranges()) {
-    return JNI_EINVAL;
-  }
+  // ------------------------------ 第2大步骤: 创建并设置JavaThread对象
 
-  // Final check of all 'AfterErgo' constraints after ergonomics which may change values.
-  bool constraint_result = JVMFlagConstraintList::check_constraints(JVMFlagConstraint::AfterErgo);
-  if (!constraint_result) {
-    return JNI_EINVAL;
-  }
+  jint os_init_2_result = os::init_2(); // 参考《2. JavaMain函数/2-5 os::init2().md》
 
-  JVMFlagWriteableList::mark_startup();
+  SafepointMechanism::initialize(); // 安全点safepoint初始化, 参考《2-6 SafepointMechanism::initialize().md》
 
-  if (PauseAtStartup) {
-    os::pause();
-  }
-
-  HOTSPOT_VM_INIT_BEGIN();
-
-  // Timing (must come after argument parsing)
-  TraceTime timer("Create VM", TRACETIME_LOG(Info, startuptime));
-
-  // Initialize the os module after parsing the args
-  jint os_init_2_result = os::init_2();
-  if (os_init_2_result != JNI_OK) return os_init_2_result;
-
-  SafepointMechanism::initialize();
-
-  jint adjust_after_os_result = Arguments::adjust_after_os();
-  if (adjust_after_os_result != JNI_OK) return adjust_after_os_result;
-
-  // Initialize output stream logging
-  ostream_init_log();
-
-  // Convert -Xrun to -agentlib: if there is no JVM_OnLoad
-  // Must be before create_vm_init_agents()
+  
+  // ----------- 第6节 启动时需要加载的lib处理 ------------
+  
+  // 对于 -Xrun 方式指定的参数, 转换成 -agentlib: 形式的参数, 之后再统一的执行 create_vm_init_agents() 函数;
+  // 所以 convert_vm_init_libraries_to_agents() 必须在 create_vm_init_agents() 函数之前执行
   if (Arguments::init_libraries_at_startup()) {
     convert_vm_init_libraries_to_agents();
   }
@@ -293,57 +61,42 @@ jint Threads::create_vm(JavaVMInitArgs* args, bool* canTryAgain) {
   if (Arguments::init_agents_at_startup()) {
     create_vm_init_agents();
   }
-
-  // Initialize Threads state
+  // ------------ 第6节 end -----------------------------
+  
+  // --- 初始化线程状态
   _thread_list = NULL;
   _number_of_threads = 0;
   _number_of_non_daemon_threads = 0;
 
-  // Initialize global data structures and create system classes in heap
-  vm_init_globals();
+  
+  vm_init_globals(); // ----- 第7节:  初始化全局数据结构, 在堆中创建system classes
 
-#if INCLUDE_JVMCI
   if (JVMCICounterSize > 0) {
     JavaThread::_jvmci_old_thread_counters = NEW_C_HEAP_ARRAY(jlong, JVMCICounterSize, mtInternal);
     memset(JavaThread::_jvmci_old_thread_counters, 0, sizeof(jlong) * JVMCICounterSize);
   } else {
-    JavaThread::_jvmci_old_thread_counters = NULL;
+    JavaThread::_jvmci_old_thread_counters = NULL; //默认会进入本分支
   }
-#endif // INCLUDE_JVMCI
-
-  // Attach the main thread to this os thread
-  JavaThread* main_thread = new JavaThread();
-  main_thread->set_thread_state(_thread_in_vm);
+  
+  // ----- 参考《2. JavaMain()函数/2-7 JavaThread.md》
+  JavaThread* main_thread = new JavaThread();    //创建JavaThread对象
+  main_thread->set_thread_state(_thread_in_vm);  //更新 _thread_state 字段
+  
+  //设置JavaThread TLS: _thr_current或者ThreadLocalStorage::set_thread(this);
   main_thread->initialize_thread_current();
-  // must do this before set_active_handles
-  main_thread->record_stack_base_and_size();
+  
+  // must do this before set_active_handles -- 关于具体线程栈的结构, 以后在相关note里面补
+  main_thread->record_stack_base_and_size(); // 设置线程栈base和size
   main_thread->register_thread_stack_with_NMT();
-  main_thread->set_active_handles(JNIHandleBlock::allocate_block());
+  main_thread->set_active_handles(JNIHandleBlock::allocate_block()); /// ???
 
-  if (!main_thread->set_as_starting_thread()) {
-    vm_shutdown_during_initialization(
-                                      "Failed necessary internal allocation. Out of swap space");
-    main_thread->smr_delete();
-    *canTryAgain = false; // don't let caller call JNI_CreateJavaVM again
-    return JNI_ENOMEM;
-  }
+  main_thread->set_as_starting_thread(); //这里会创建OSThread, 见第8节
 
-  // Enable guard page *after* os::create_main_thread(), otherwise it would
-  // crash Linux VM, see notes in os_linux.cpp.
-  main_thread->create_stack_guard_pages();
+  main_thread->create_stack_guard_pages(); //关于stack guard page, 以后再整理
 
-  // Initialize Java-Level synchronization subsystem
-  ObjectMonitor::Initialize();
+  ObjectMonitor::Initialize(); // 初始化Java语言层面的synchronization支持, 但Initialize()中没有什么太重要的逻辑
 
-  // Initialize global modules
-  jint status = init_globals();
-  if (status != JNI_OK) {
-    main_thread->smr_delete();
-    *canTryAgain = false; // don't let caller call JNI_CreateJavaVM again
-    return status;
-  }
-
-  JFR_ONLY(Jfr::on_vm_init();)
+  jint status = init_globals(); // 差点把这儿放过去, 这里初始化了很多重要东西
 
   // Should be done after the heap is fully created
   main_thread->cache_global_variables();
@@ -582,25 +335,13 @@ jint Threads::create_vm(JavaVMInitArgs* args, bool* canTryAgain) {
 
 
 
-### 3.1 JDK_Version_init() 函数
-
-> **参考：《2. jdk version初始化.md》**
-
-
-
-### 3.2 ThreadLocalStorage::init()
-
-> **初始化ThreadLocalStorage，初始化`static pthread_key_t _thread_key`，参考《3. 线程本地存储.md》**
-
-
-
-### 3.3 Arguments::process_sun_java_launcher_properties()方法
+## 1. Arguments::process_sun_java_launcher_properties()方法
 
 > **源文件：arguments.cpp**
 >
 > **凡是涉及到调用Arguments的处理options逻辑的话，大部分都是转化到Arguments的特定字段值 **
 >
-> **本方法遍历命令行options，可能会影响到的字段为: **
+> **本方法遍历命令行options，主要处理Launcher相关参数，可能会影响到的字段为: **
 >
 > **`_sun_java_launcher`、`_sun_java_launcher_is_altjvm`、`_sun_java_launcher_pid`**
 
@@ -608,28 +349,29 @@ jint Threads::create_vm(JavaVMInitArgs* args, bool* canTryAgain) {
 // 解析命令行获取 Launcher相关JVM options
 void Arguments::process_sun_java_launcher_properties(JavaVMInitArgs* args) {
   
-  //必须先处理Launcher option, 因为后面初始化VM时可能会用来这些option
+  //必须先处理Launcher option, 因为后面初始化VM时可能会用到这些option
   for (int index = 0; index < args->nOptions; index++) {
     const JavaVMOption* option = args->options + index;
     const char* tail;
 
     //参考《1. 入口.md》, tail = "SUN_STANDARD"
     if (match_option(option, "-Dsun.java.launcher=", &tail)) {
-      //设置 _sun_java_launcher = "SUN_STANDARD"
-      process_java_launcher_argument(tail, option->extraInfo);
-      continue;
+      	//设置 _sun_java_launcher = "SUN_STANDARD"
+      	process_java_launcher_argument(tail, option->extraInfo);
+      	continue;
     }
     
-    //--- 默认是没有下面两个option的
+   	//--- 默认是没有下面两个option的
     if (match_option(option, "-Dsun.java.launcher.is_altjvm=", &tail)) {
-      if (strcmp(tail, "true") == 0) {
-        _sun_java_launcher_is_altjvm = true;
-      }
-      continue;
+    	  if (strcmp(tail, "true") == 0) {
+      	  _sun_java_launcher_is_altjvm = true;
+      	}
+      	continue;
     }
+    
     if (match_option(option, "-Dsun.java.launcher.pid=", &tail)) {
-      _sun_java_launcher_pid = atoi(tail);
-      continue;
+    	  _sun_java_launcher_pid = atoi(tail);
+      	continue;
     }
   }
 }
@@ -637,146 +379,9 @@ void Arguments::process_sun_java_launcher_properties(JavaVMInitArgs* args) {
 
 
 
-### 3.4 os::init()
-
-> **源文件: os_bsd.cpp**
->
-> **作用：硬件信息、线程信息、时间函数、线程条件/同步对象初始化**
-
-```c++
-void os::init(void) { //需要在解析jvm options前调用本方法
-  char dummy;   // used to get a guess on initial stack address
-
-  // 在BsdThreads情况下, JavaMain Thread pid 和 java launcher thread是不同的;
-  // 所以在Bsd系统中, launcher pid需要通过 -Dsun.java.launcher.pid传入;
-  // 结合3.3节, 如果没有传入这个属性, 是不会初始化_sun_java_launcher_pid的;
-  // 而此方法就是获取该变量的值, 所以默认情况下java_launcher_pid为0
-  pid_t java_launcher_pid = (pid_t) Arguments::sun_java_launcher_pid();
-
-  // 如果没有设置 _sun_java_launcher_pid变量, 则调用getpid()做为结果
-  _initial_pid = (java_launcher_pid > 0) ? java_launcher_pid : getpid();
-
-  clock_tics_per_sec = CLK_TCK;
-
-  //os::_rand_seed = 1234567
-  init_random(1234567);
-
-  //getpagesize()为系统调用, 返回一个page中的字节数, 默认4096
-  //Bsd::_page_size = 4096
-  Bsd::set_page_size(getpagesize());
-
-  //os::_page_sizes[0] = 4096
-  //os::_page_sizes[1] = 0; //0值为哨兵
-  init_page_sizes((size_t) Bsd::page_size());
-
-  //sysctl系统调用获取本机cpu核心数, 设置到os::_processor_count中
-  Bsd::initialize_system_info();
-
-  // _main_thread points to the thread that created/loaded the JVM.
-  Bsd::_main_thread = pthread_self(); //设置Bsd::_main_thread
- 
-  //时间相关
-  Bsd::clock_init();
-  initial_time_count = javaTimeNanos();
-
-  os::Posix::init(); //方法调用, 初始化时间函数指针和pthread条件/同步对象
-}
-```
 
 
-
-#### 3.4.1 os::Posix::init()方法
-
-> **源码： os_posix.cpp**
-
-```c++
-// 当前系统支持哪些 POSIX API 并进行一些配置
-// 本方法调用时没有logging支持, 会在init_2()中进行log
-void os::Posix::init(void) {
-  
-  // 1. Check for CLOCK_MONOTONIC support.
-  void* handle = RTLD_DEFAULT;
-  
-  // 初始化两个函数指针, 分别指向两个
-  // _clock_gettime => clock_getres系统调用
-  // _clock_getres  => clock_gettime系统调用
-  _clock_gettime = NULL;
-  _clock_getres = NULL;
-
-  int (*clock_getres_func)(clockid_t, struct timespec*) =
-    (int(*)(clockid_t, struct timespec*))dlsym(handle, "clock_getres");
-  int (*clock_gettime_func)(clockid_t, struct timespec*) =
-    (int(*)(clockid_t, struct timespec*))dlsym(handle, "clock_gettime");
-  
-  if (clock_getres_func != NULL && clock_gettime_func != NULL) {
-    struct timespec res;
-    struct timespec tp;
-    if (clock_getres_func(CLOCK_MONOTONIC, &res) == 0 &&
-        clock_gettime_func(CLOCK_MONOTONIC, &tp) == 0) {
-      
-      _clock_gettime = clock_gettime_func;
-      _clock_getres = clock_getres_func;
-    } else {
-    }
-  }
-
-  // 2. Check for pthread_condattr_setclock support.
-  // 初始化 _pthread_condattr_setclock => pthread_condattr_setclock
-  // 但是好像Mac没有这个系统调用
-  _pthread_condattr_setclock = NULL;
-
-  int (*condattr_setclock_func)(pthread_condattr_t*, clockid_t) =
-    (int (*)(pthread_condattr_t*, clockid_t))dlsym(RTLD_DEFAULT,
-                                                   "pthread_condattr_setclock");
-  if (condattr_setclock_func != NULL) {
-    _pthread_condattr_setclock = condattr_setclock_func;
-  }
-
-  // 3. 初始化上面的三个函数指针后, 初始化全局条件/互斥object
-  pthread_init_common();
-
-  // --- 有啥用???
-  int status;
-  if (_pthread_condattr_setclock != NULL && _clock_gettime != NULL) {
-    if ((status = _pthread_condattr_setclock(_condAttr, CLOCK_MONOTONIC)) != 0) {
-      if (status == EINVAL) {
-        _use_clock_monotonic_condattr = false;
-        warning("Unable to use monotonic clock with relative timed-waits" \
-                " - changes to the time-of-day clock may have adverse affects");
-      } else {
-        fatal("pthread_condattr_setclock: %s", os::strerror(status));
-      }
-    } else {
-      _use_clock_monotonic_condattr = true;
-    }
-  } else {
-    _use_clock_monotonic_condattr = false;
-  }
-}
-
-// --- os::Posix::pthread_init_common方法
-/*
-初始化的全局变量: 
-static pthread_condattr_t _condAttr[1]; //条件object
-static pthread_mutexattr_t _mutexAttr[1]; //互斥object
-*/
-static void pthread_init_common(void) {
-  int status;
-  if ((status = pthread_condattr_init(_condAttr)) != 0) {
-    fatal("pthread_condattr_init: %s", os::strerror(status));
-  }
-  if ((status = pthread_mutexattr_init(_mutexAttr)) != 0) {
-    fatal("pthread_mutexattr_init: %s", os::strerror(status));
-  }
-  if ((status = pthread_mutexattr_settype(_mutexAttr, PTHREAD_MUTEX_NORMAL)) != 0) {
-    fatal("pthread_mutexattr_settype: %s", os::strerror(status));
-  }
-}
-```
-
-
-
-### 3.5 Arguments::init_system_properties()
+## 2. Arguments::init_system_properties()
 
 > **函数作用: 初始化Arguments中的用于保存不同的path信息以及属性的成员变量，主要有如下几个字段**
 >
@@ -814,11 +419,10 @@ static void pthread_init_common(void) {
 > > > **可以看到，\_value在父类PathString中定义，\_key在SystemProperty中定义。**
 > > >
 > > > **此外还有一个`_next`字段，所以多个SystemProperty可以构成一个单向链表。**
->
 
 ```c++
 void Arguments::init_system_properties() {
-  // --- 下面的XXX_path字段, 使用NULL来初始化
+  // --- 下面的XXX_path字段, _value使用NULL来初始化
   // --- 初始化_system_properies链表, 并先往链表中添加了VM版本信息SystemProperty属性
 
   //--- SystemProperty构造方法的第3个参数 false/true 设置的是 _writeable字段
@@ -872,7 +476,7 @@ void Arguments::init_system_properties() {
 
 
 
-#### 3.5.1 os::init_system_properties_values()
+### 2.1 os::init_system_properties_values()
 
 > **源码: os_bsd.cpp**
 >
@@ -1013,7 +617,7 @@ void os::init_system_properties_values() {
 
 
 
-##### 3.5.1.1 os::jvm_path()方法
+#### 2.1.1 os::jvm_path()方法
 
 > **源码: os_bsd.cpp**
 >
@@ -1109,7 +713,7 @@ void os::jvm_path(char *buf, jint buflen) { // 获取libjvm.so或libjvm.dylib的
 
 
 
-### 3.6 Arguments::init_version_specific_system_properties() 方法
+## 3. Arguments::init_version_specific_system_properties() 方法
 
 > **源码: arguments.cpp**
 >
@@ -1126,28 +730,21 @@ void Arguments::init_version_specific_system_properties() {
   jio_snprintf(buffer, bufsz, UINT32_FORMAT, spec_version); //12
 
   //"Oracle Corporation"
-  PropertyList_add(&_system_properties,
-      new SystemProperty("java.vm.specification.vendor",  spec_vendor, false));
+  PropertyList_add(&_system_properties,new SystemProperty("java.vm.specification.vendor",  spec_vendor, false));
   
   //"12"
-  PropertyList_add(&_system_properties,
-      new SystemProperty("java.vm.specification.version", buffer, false));
+  PropertyList_add(&_system_properties, new SystemProperty("java.vm.specification.version", buffer, false));
   
   //"Oracle Corporation"
-  PropertyList_add(&_system_properties,
-      new SystemProperty("java.vm.vendor", VM_Version::vm_vendor(),  false));
+  PropertyList_add(&_system_properties,new SystemProperty("java.vm.vendor", VM_Version::vm_vendor(),  false));
 }
 ```
 
 
 
-### 3.7 Arguments::parse() 方法 
-
-> **参考《9. 解析Options参数 Arguments::parse.md》**
 
 
-
-### 3.8 os::init_before_ergo() 方法
+## 4. os::init_before_ergo() 方法
 
 > **主要设置JavaThread 线程栈大小**
 
@@ -1175,23 +772,24 @@ void os::init_before_ergo() {
 
 
 
-### 3.9 Arguments::apply_ergo() 方法
+## 5. Arguments::apply_ergo() 方法
+
+> **垃圾收集器、可用堆大小、GCConfig初始化**
 
 ```c++
 jint Arguments::apply_ergo() {
   // Set flags based on ergonomics.
-  jint result = set_ergonomics_flags();
+  jint result = set_ergonomics_flags(); // 1): 其中的重要步骤是确定垃圾回收器, 使用compressedOops和compressed_obj_ptr
   if (result != JNI_OK) return result;
 
   // Set heap size based on available physical memory
   set_heap_size();
 
-  GCConfig::arguments()->initialize();
+  GCConfig::arguments()->initialize(); //设置默认的垃圾收集器参数
 
-  set_shared_spaces_flags();
+  set_shared_spaces_flags(); //没啥用
 
-  // Initialize Metaspace flags and alignments
-  Metaspace::ergo_initialize();
+  Metaspace::ergo_initialize(); // Initialize Metaspace flags and alignments
 
   // Set compiler flags after GC is selected and GC specific
   // flags (LoopStripMiningIter) are set.
@@ -1226,14 +824,6 @@ jint Arguments::apply_ergo() {
     UseBiasedLocking = false;
   }
 
-#ifdef CC_INTERP
-  // Clear flags not supported on zero.
-  FLAG_SET_DEFAULT(ProfileInterpreter, false);
-  FLAG_SET_DEFAULT(UseBiasedLocking, false);
-  LP64_ONLY(FLAG_SET_DEFAULT(UseCompressedOops, false));
-  LP64_ONLY(FLAG_SET_DEFAULT(UseCompressedClassPointers, false));
-#endif // CC_INTERP
-
   if (PrintAssembly && FLAG_IS_DEFAULT(DebugNonSafepoints)) {
     warning("PrintAssembly is enabled; turning on DebugNonSafepoints to gain additional output");
     DebugNonSafepoints = true;
@@ -1257,21 +847,13 @@ jint Arguments::apply_ergo() {
 
   // Apply CPU specific policy for the BiasedLocking
   if (UseBiasedLocking) {
-    if (!VM_Version::use_biased_locking() &&
-        !(FLAG_IS_CMDLINE(UseBiasedLocking))) {
+    if (!VM_Version::use_biased_locking() && !(FLAG_IS_CMDLINE(UseBiasedLocking))) {
       UseBiasedLocking = false;
     }
   }
 #ifdef COMPILER2
   if (!UseBiasedLocking) {
     UseOptoBiasInlining = false;
-  }
-#endif
-
-#if defined(IA32)
-  // Only server compiler can optimize safepoints well enough.
-  if (!is_server_compilation_mode_vm()) {
-    FLAG_SET_ERGO_IF_DEFAULT(bool, ThreadLocalHandshakes, false);
   }
 #endif
 
@@ -1288,26 +870,18 @@ jint Arguments::apply_ergo() {
 
 
 
-#### 3.9.1 Arguments::set_ergonomics_flags() 方法
+### 5.1 Arguments::set_ergonomics_flags() 方法
 
 ```c++
 jint Arguments::set_ergonomics_flags() {
-  GCConfig::initialize();
+  //openjdk12 选的G1收集器
+  GCConfig::initialize(); //1. 选择垃圾收集器 _arguments = select_gc(); 宏太多了,追不进去了, 丫的一堆人疯了嵌套宏, 有病
 
-  set_conservative_max_heap_alignment();
+  set_conservative_max_heap_alignment(); // 2. ???
 
-#ifndef ZERO
-#ifdef _LP64
-  set_use_compressed_oops();
+  set_use_compressed_oops(); //如果本机内存小于 max_heap_for_compressed_oops(), 则会使用压缩oops
 
-  // set_use_compressed_klass_ptrs() must be called after calling
-  // set_use_compressed_oops().
-  set_use_compressed_klass_ptrs();
-
-  // Also checks that certain machines are slower with compressed oops
-  // in vm_version initialization code.
-#endif // _LP64
-#endif // !ZERO
+  set_use_compressed_klass_ptrs(); //使用压缩klass_ptrs的前提是使用压缩oops, 所以本函数必须在上一个函数调用的后面
 
   return JNI_OK;
 }
@@ -1343,23 +917,10 @@ GCArguments* GCConfig::select_gc() {
     // 即采用 G1 收集器
     select_gc_ergonomically(); 
 
-    
-    
-    if (is_no_gc_selected()) {
-      // Failed to select GC ergonomically
-      vm_exit_during_initialization("Garbage collector not selected "
-                                    "(default collector explicitly disabled)", NULL);
-    }
-
     // Succeeded to select GC ergonomically
     _gc_selected_ergonomically = true;
   }
-
-  if (!is_exactly_one_gc_selected()) {
-    // More than one GC selected
-    vm_exit_during_initialization("Multiple garbage collectors selected", NULL);
-  }
-
+  
   // Exactly one GC selected
   FOR_EACH_SUPPORTED_GC(gc) {
     if (gc->_flag) {
@@ -1370,6 +931,246 @@ GCArguments* GCConfig::select_gc() {
   fatal("Should have found the selected GC");
 
   return NULL;
+}
+```
+
+
+
+## 6. convert_vm_init_libraries_to_agents() 方法
+
+> **thread.cpp**
+
+```c++
+/**作用: 将 -Xrun 参数转换为 -agentlib: 形式，之后再统一的使用 -agentlib: 逻辑处理**/
+// **由于见过的 -Xrun 的方式比较少，所以暂时先略过这个方法**
+void Threads::convert_vm_init_libraries_to_agents() {
+  AgentLibrary* agent;
+  AgentLibrary* next;
+
+  // --- -Xrun 参数保存在Arguments::_libraryList 中; 遍历这个list
+  for (agent = Arguments::libraries(); agent != NULL; agent = next) {
+    next = agent->next();  // cache the next agent now as this agent may get moved off this list
+    OnLoadEntry_t on_load_entry = lookup_jvm_on_load(agent);
+
+    // If there is an JVM_OnLoad function it will get called later,
+    // otherwise see if there is an Agent_OnLoad
+    if (on_load_entry == NULL) {
+      on_load_entry = lookup_agent_on_load(agent);
+      if (on_load_entry != NULL) {
+        // switch it to the agent list -- so that Agent_OnLoad will be called,
+        // JVM_OnLoad won't be attempted and Agent_OnUnload will
+        Arguments::convert_library_to_agent(agent);
+      } else {
+        vm_exit_during_initialization("Could not find JVM_OnLoad or Agent_OnLoad function in the library", agent->name());
+      }
+    }
+  }
+}
+
+// ---------- 重要方法
+// Create agents for -agentlib:  -agentpath:  and converted -Xrun
+// Invokes Agent_OnLoad
+// Called very early -- before JavaThreads exist
+void Threads::create_vm_init_agents() {
+  extern struct JavaVM_ main_vm;
+  AgentLibrary* agent;
+
+  JvmtiExport::enter_onload_phase();
+
+  for (agent = Arguments::agents(); agent != NULL; agent = agent->next()) {
+    // CDS dumping does not support native JVMTI agent.
+    // CDS dumping supports Java agent if the AllowArchivingWithJavaAgent diagnostic option is specified.
+    if (DumpSharedSpaces) {
+      if(!agent->is_instrument_lib()) {
+        vm_exit_during_cds_dumping("CDS dumping does not support native JVMTI agent, name", agent->name());
+      } else if (!AllowArchivingWithJavaAgent) {
+        vm_exit_during_cds_dumping(
+          "Must enable AllowArchivingWithJavaAgent in order to run Java agent during CDS dumping");
+      }
+    }
+
+    OnLoadEntry_t  on_load_entry = lookup_agent_on_load(agent);
+
+    if (on_load_entry != NULL) {
+      // Invoke the Agent_OnLoad function
+      jint err = (*on_load_entry)(&main_vm, agent->options(), NULL);
+      if (err != JNI_OK) {
+        vm_exit_during_initialization("agent library failed to init", agent->name());
+      }
+    } else {
+      vm_exit_during_initialization("Could not find Agent_OnLoad function in the agent library", agent->name());
+    }
+  }
+
+  JvmtiExport::enter_primordial_phase();
+}
+```
+
+
+
+## 7. vm_init_globals() 
+
+> **源码: init.cpp**
+
+```c++
+void vm_init_globals() {  
+  /*   1. 初始化各基础类型、Oop对象在堆中的大小等; oop相关如下(在默认情况下, UseCompressedOops为true):
+  	if (UseCompressedOops) {
+    	heapOopSize        = jintSize;  					//4
+    	LogBytesPerHeapOop = LogBytesPerInt;			//2
+    	LogBitsPerHeapOop  = LogBitsPerInt;				//5
+    	BytesPerHeapOop    = BytesPerInt;					//4
+    	BitsPerHeapOop     = BitsPerInt;					//32
+  	}
+  */
+  basic_types_init();  
+  eventlog_init();						// log相关
+  mutex_init();								// lock相关
+  
+  /* 2. 初始化 ChunkPool; 主要是初始化ChunkPool中的四个静态变量: 
+	  static ChunkPool* _large_pool;
+  	static ChunkPool* _medium_pool;
+  	static ChunkPool* _small_pool;
+  	static ChunkPool* _tiny_pool;
+  */
+  chunkpool_init();
+  
+  perfMemory_init(); //略
+  SuspendibleThreadSet_init(); //略
+}
+```
+
+
+
+### 7.1 BasicType
+
+> **源码: globalDefinitions.hpp**
+>
+> ```c++
+> enum BasicType {
+>   T_BOOLEAN     =  4,
+>   T_CHAR        =  5,
+>   T_FLOAT       =  6,
+>   T_DOUBLE      =  7,
+>   T_BYTE        =  8,
+>   T_SHORT       =  9,
+>   T_INT         = 10,
+>   T_LONG        = 11,
+>   T_OBJECT      = 12,
+>   T_ARRAY       = 13,
+>   T_VOID        = 14,
+>   T_ADDRESS     = 15,
+>   T_NARROWOOP   = 16,
+>   T_METADATA    = 17,
+>   T_NARROWKLASS = 18,
+>   T_CONFLICT    = 19, // for stack value type with conflicting contents
+>   T_ILLEGAL     = 99
+> };
+> ```
+>
+> > **BasicType 到 char 之间的转换:**
+> >
+> > ```c++
+> > char type2char_tab[T_CONFLICT+1]=
+> > 				{ 0, 0, 0, 0, 'Z', 'C', 'F', 'D', 'B', 'S', 'I', 'J', 'L', '[', 'V', 0, 0, 0, 0, 0};
+> > 
+> > // --- Basic 转 char
+> > inline char type2char(BasicType t) { return (uint)t < T_CONFLICT+1 ? type2char_tab[t] : 0; }
+> > 
+> > // --- char 转 BasicType
+> > inline BasicType char2type(char c) {
+> >   switch( c ) {
+> >   case 'B': return T_BYTE;
+> >   case 'C': return T_CHAR;
+> >   case 'D': return T_DOUBLE;
+> >   case 'F': return T_FLOAT;
+> >   case 'I': return T_INT;
+> >   case 'J': return T_LONG;
+> >   case 'S': return T_SHORT;
+> >   case 'Z': return T_BOOLEAN;
+> >   case 'V': return T_VOID;
+> >   case 'L': return T_OBJECT;
+> >   case '[': return T_ARRAY;
+> >   }
+> >   return T_ILLEGAL;
+> > }
+> > ```
+
+
+
+### 7.2 Chunk & ChunkPool
+
+> **源码: arena.hpp arena.cpp**
+>
+> ```c++
+> // --- arena.hpp --- Linked list of raw memory chunks
+> class Chunk: CHeapObj<mtChunk> {
+>  private:
+>   Chunk*       _next;     // Next Chunk in list
+>   const size_t _len;      // Size of this Chunk
+>  public:
+>   void* operator new(size_t size, AllocFailType alloc_failmode, size_t length) throw();
+>   void  operator delete(void* p);
+>   Chunk(size_t length);
+> 	//.... 其它方法略
+> };
+> 
+> // --- arena.cpp --- MT-safe pool of chunks to reduce malloc/free thrashing
+> class ChunkPool: public CHeapObj<mtInternal> {
+>   Chunk*       _first;        // first cached Chunk; its first word points to next chunk
+>   size_t       _num_chunks;   // number of unused chunks in pool
+>   size_t       _num_used;     // number of chunks currently checked out
+>   const size_t _size;         // size of each chunk (must be uniform)
+> 
+>   // Our four static pools
+>   static ChunkPool* _large_pool;
+>   static ChunkPool* _medium_pool;
+>   static ChunkPool* _small_pool;
+>   static ChunkPool* _tiny_pool;
+> }
+> ```
+>
+> 
+
+
+
+## 8. Thread::set_as_starting_thread(): 创建实际的OS线程
+
+> **对于JVM中定义的Thread以及JavaThread子类，它们只是定义了相关的成员变量及方法，虽然类名中包含"Thread"这个字符串，但它们本身并没有启动新线程并执行代码的作用，`而是需要在操作系统中根据它们的成员变量信息来创建实际的线程来执行，即Thread/JavaThread只是启动实际操作系统线程的信息提供者`**
+
+```c++
+bool Thread::set_as_starting_thread() { //源码 thread.cpp
+	  return os::create_main_thread((JavaThread*)this);
+}
+
+// ---- os_bsd.cpp
+bool os::create_main_thread(JavaThread* thread) {
+    //主要创建了一个JavaThread关联的OSThread, 而OSThread通过 _thread_id 字段关联了当前线程
+	  return create_attached_thread(thread); 
+}
+
+bool os::create_attached_thread(JavaThread* thread) {
+
+  OSThread* osthread = new OSThread(NULL, NULL); // 创建空OSThread对象
+  osthread->set_thread_id(os::Bsd::gettid()); //设置OSThread对象对应的内核线程id, 也就是当前线程
+
+  // Store pthread info into the OSThread
+#ifdef __APPLE__
+  uint64_t unique_thread_id = locate_unique_thread_id(osthread->thread_id());
+  guarantee(unique_thread_id != 0, "just checking");
+  osthread->set_unique_thread_id(unique_thread_id);
+#endif
+  osthread->set_pthread_id(::pthread_self());
+
+  os::Bsd::init_thread_fpu_state(); //初始化浮点数寄存器
+
+  osthread->set_state(RUNNABLE); //初始化osthread状态为RUNNABLE
+
+  thread->set_osthread(osthread); //设置JavaThread对应的OSThread
+
+  os::Bsd::hotspot_sigmask(thread); // 设置线程 signal mask
+
+  return true;
 }
 ```
 
